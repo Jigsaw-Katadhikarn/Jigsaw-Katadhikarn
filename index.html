@@ -74,7 +74,7 @@
   <nav>
     <button data-go="setup">เล่นใหม่</button>
     <button data-go="board">🏆 ตารางคะแนน</button>
-    <button id="btnDb">⚙️ ฐานข้อมูล <span id="dbStatus" class="dot"></span></button>
+    <span id="btnDb" class="small">ฐานข้อมูล <span id="dbStatus" class="dot"></span></span>
   </nav>
 </header>
 
@@ -203,21 +203,6 @@
   </section>
 </main>
 
-<!-- ========== กล่องตั้งค่า Turso ========== -->
-<dialog id="dlgDb">
-  <h2>⚙️ เชื่อมต่อฐานข้อมูล Turso</h2>
-  <label class="t">Database URL</label>
-  <input id="dbUrl" placeholder="libsql://ชื่อฐานข้อมูล-ชื่อผู้ใช้.turso.io">
-  <label class="t">Auth Token</label>
-  <input id="dbToken" placeholder="eyJhbGciOi...">
-  <p class="small">ถ้ายังไม่ได้ตั้งค่า เกมจะบันทึกผลไว้ในเบราว์เซอร์เครื่องนี้แทน (โหมด 2 เครื่องต้องใช้ Turso)</p>
-  <p class="msg" id="dbMsg"></p>
-  <div class="btns">
-    <button class="primary" id="btnDbSave">ทดสอบและบันทึก</button>
-    <button id="btnDbClear">ล้างการตั้งค่า</button>
-    <button id="btnDbClose">ปิด</button>
-  </div>
-</dialog>
 
 <script>
 /* =====================================================================
@@ -254,79 +239,37 @@ function show(name){
 /* =====================================================================
    ส่วนที่ 2 : เชื่อมต่อฐานข้อมูล Turso ผ่าน HTTP API (/v2/pipeline)
    ===================================================================== */
-const DB = {
-  url:   localStorage.getItem('turso_url')   || '',
-  token: localStorage.getItem('turso_token') || '',
-  get ready(){ return !!(this.url && this.token); }
-};
+// ไม่มี URL / Token ในโค้ดนี้อีกแล้ว — เก็บไว้ที่เซิร์ฟเวอร์ (Netlify) เท่านั้น
+const DB = { ready: false };
 
-function toArg(v){
-  if (v === null || v === undefined) return { type: 'null' };
-  if (typeof v === 'number')
-    return Number.isInteger(v) ? { type: 'integer', value: String(v) } : { type: 'float', value: v };
-  return { type: 'text', value: String(v) };
-}
-
-// ฟังก์ชันหลักสำหรับรันคำสั่ง SQL  —  ใช้ ? แทนค่าที่ส่งเข้ามาเสมอ (กัน SQL Injection)
+// ส่งคำสั่งไปที่ Netlify Function  (ฟังก์ชันนั้นจะต่อ Turso แทนเรา)
+// ใช้ ? แทนค่าที่ส่งเข้ามาเสมอ (กัน SQL Injection)
 async function sql(query, params = []){
-  const url = DB.url.replace(/^libsql:\/\//, 'https://').replace(/\/$/, '') + '/v2/pipeline';
-  const res = await fetch(url, {
+  const res = await fetch('/.netlify/functions/db', {
     method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + DB.token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ requests: [
-      { type: 'execute', stmt: { sql: query, args: params.map(toArg) } },
-      { type: 'close' }
-    ]})
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: query, args: params })
   });
-  if (!res.ok) throw new Error('Turso ตอบกลับ HTTP ' + res.status);
-  const data = await res.json();
-  const r = data.results[0];
-  if (r.type === 'error') throw new Error(r.error.message);
-
-  const { cols, rows, affected_row_count } = r.response.result;
-  const out = rows.map(row => {
-    const obj = {};
-    row.forEach((cell, i) => {
-      obj[cols[i].name] = cell.type === 'null' ? null
-                        : cell.type === 'integer' ? Number(cell.value)
-                        : cell.value;
-    });
-    return obj;
-  });
-  out.affected = affected_row_count;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('เซิร์ฟเวอร์ตอบกลับ HTTP ' + res.status));
+  const out = data.rows || [];
+  out.affected = data.affected;
   return out;
 }
 
-// สร้างตารางถ้ายังไม่มี (ดูคำอธิบายแต่ละคอลัมน์ใน schema.sql)
+// ให้เซิร์ฟเวอร์สร้างตารางถ้ายังไม่มี (ดูโครงสร้างใน schema.sql)
 async function initTables(){
-  await sql(`CREATE TABLE IF NOT EXISTS results (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      player_name TEXT    NOT NULL,
-      pieces      INTEGER NOT NULL,
-      time_ms     INTEGER NOT NULL,
-      moves       INTEGER NOT NULL,
-      mode        TEXT    NOT NULL,
-      room_code   TEXT,
-      created_at  TEXT    NOT NULL)`);
-  await sql(`CREATE TABLE IF NOT EXISTS rooms (
-      code           TEXT PRIMARY KEY,
-      pieces         INTEGER NOT NULL,
-      image          TEXT    NOT NULL,
-      order_json     TEXT    NOT NULL,
-      host_name      TEXT    NOT NULL,
-      guest_name     TEXT,
-      status         TEXT    NOT NULL DEFAULT 'waiting',
-      started_at     INTEGER,
-      host_progress  INTEGER DEFAULT 0,
-      guest_progress INTEGER DEFAULT 0,
-      host_time      INTEGER,
-      guest_time     INTEGER,
-      created_at     INTEGER NOT NULL)`);
+  const res = await fetch('/.netlify/functions/db', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'init' })
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
 }
 
 function updateDbStatus(){
   $('dbStatus').classList.toggle('on', DB.ready);
-  $('btnDb').title = DB.ready ? 'เชื่อมต่อ Turso แล้ว' : 'ยังไม่ได้เชื่อมต่อ (บันทึกในเครื่อง)';
+  $('btnDb').title = DB.ready ? 'เชื่อมต่อฐานข้อมูลแล้ว' : 'ยังเชื่อมต่อไม่ได้ (บันทึกในเครื่อง)';
 }
 
 /* =====================================================================
@@ -363,7 +306,7 @@ async function loadBoard(){
       rows = JSON.parse(localStorage.getItem('local_results') || '[]')
         .filter(r => !p || r.pieces == p)
         .sort((a, b) => a.time_ms - b.time_ms).slice(0, 20);
-      $('boardSrc').textContent = 'ข้อมูลในเครื่องนี้ (ยังไม่ได้เชื่อม Turso)';
+      $('boardSrc').textContent = 'ข้อมูลในเครื่องนี้ (เชื่อมฐานข้อมูลไม่ได้)';
     }
   } catch (e){
     $('boardBody').innerHTML = `<tr><td colspan="7">โหลดไม่สำเร็จ: ${esc(e.message)}</td></tr>`;
@@ -731,7 +674,7 @@ function refreshSetupForm(){
   $('name2Box').hidden = state.mode !== 'turn';
   $('codeBox').hidden = !(online && role === 'guest');
   $('puzzleOpts').hidden = online && role === 'guest';
-  $('setupMsg').textContent = online && !DB.ready ? 'โหมดนี้ต้องเชื่อมต่อ Turso ก่อน (กดปุ่ม ⚙️ ฐานข้อมูล)' : '';
+  $('setupMsg').textContent = online && !DB.ready ? 'โหมดนี้ต้องเชื่อมต่อฐานข้อมูลได้ก่อน (ตรวจสอบการตั้งค่าบน Netlify)' : '';
 }
 document.querySelectorAll('input[name=mode], input[name=role]').forEach(el => el.onchange = refreshSetupForm);
 
@@ -799,36 +742,14 @@ document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => {
 });
 $('boardPieces').onchange = loadBoard;
 
-// ----- กล่องตั้งค่าฐานข้อมูล -----
-$('btnDb').onclick = () => {
-  $('dbUrl').value = DB.url; $('dbToken').value = DB.token; $('dbMsg').textContent = '';
-  $('dlgDb').showModal();
-};
-$('btnDbClose').onclick = () => $('dlgDb').close();
-$('btnDbClear').onclick = () => {
-  DB.url = DB.token = '';
-  localStorage.removeItem('turso_url'); localStorage.removeItem('turso_token');
-  updateDbStatus(); refreshSetupForm(); $('dlgDb').close();
-};
-$('btnDbSave').onclick = async () => {
-  DB.url = $('dbUrl').value.trim(); DB.token = $('dbToken').value.trim();
-  $('dbMsg').style.color = 'var(--muted)'; $('dbMsg').textContent = 'กำลังทดสอบการเชื่อมต่อ...';
-  try {
-    await initTables();
-    localStorage.setItem('turso_url', DB.url); localStorage.setItem('turso_token', DB.token);
-    $('dbMsg').style.color = 'var(--ok)'; $('dbMsg').textContent = '✅ เชื่อมต่อสำเร็จและสร้างตารางเรียบร้อย';
-  } catch (e){
-    DB.url = localStorage.getItem('turso_url') || ''; DB.token = localStorage.getItem('turso_token') || '';
-    $('dbMsg').style.color = 'var(--bad)'; $('dbMsg').textContent = '❌ เชื่อมต่อไม่ได้: ' + e.message;
-  }
-  updateDbStatus(); refreshSetupForm();
-};
-
 // ----- เริ่มต้นโปรแกรม -----
 $('preview').src = defaultImage();
 updateDbStatus();
 refreshSetupForm();
-if (DB.ready) initTables().catch(e => console.warn('เชื่อม Turso ไม่ได้:', e.message));
+initTables()
+  .then(() => { DB.ready = true; })
+  .catch(e => console.warn('เชื่อมฐานข้อมูลไม่ได้:', e.message))
+  .finally(() => { updateDbStatus(); refreshSetupForm(); });
 </script>
 </body>
 </html>
